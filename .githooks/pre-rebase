@@ -1,0 +1,5 @@
+#!/bin/sh
+
+echo "ERROR [pre-rebase]: 'git rebase' is explicitly prohibited in this repository."
+echo "Branch integration must use 'git merge --no-ff' to preserve commit history."
+exit 1

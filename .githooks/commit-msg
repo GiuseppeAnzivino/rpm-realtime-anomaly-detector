@@ -1,0 +1,57 @@
+#!/bin/sh
+
+COMMIT_MSG_FILE=$1
+MSG_CONTENT=$(grep -v '^#' "$COMMIT_MSG_FILE")
+FIRST_LINE=$(echo "$MSG_CONTENT" | head -n 1)
+
+# Allow standard Git merge messages
+if echo "$FIRST_LINE" | grep -qE "^Merge "; then
+    exit 0
+fi
+
+# 1. Check for unedited placeholders < >
+if echo "$MSG_CONTENT" | grep -q "<.*>"; then
+    echo "ERROR [commit-msg]: Unfilled placeholders < > detected in commit message!"
+    exit 1
+fi
+
+# 2. Check mandatory sections
+if ! echo "$MSG_CONTENT" | grep -q "ADDED:" || \
+   ! echo "$MSG_CONTENT" | grep -q "CHANGED:"; then
+    echo "ERROR [commit-msg]: Missing mandatory sections (ADDED: or CHANGED:)."
+    exit 1
+fi
+
+# 3. Validate header format: <type>(<scope>): <title> (allows '/' inside scope)
+if ! echo "$FIRST_LINE" | grep -qE "^(feature|fix|refactor|test|chore)\([a-z0-9/-]+\): .+"; then
+    echo "ERROR [commit-msg]: Invalid header format. Expected: <type>(<scope>): <concise summary>"
+    exit 1
+fi
+
+# 4. Validate prefix and scope structure against current branch
+BRANCH_NAME=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
+
+case "$BRANCH_NAME" in
+    feature/*)  REQUIRED_TYPE="feature" ;;
+    fix/*)      REQUIRED_TYPE="fix" ;;
+    refactor/*) REQUIRED_TYPE="refactor" ;;
+    test/*)     REQUIRED_TYPE="test" ;;
+    *)          REQUIRED_TYPE="chore" ;;
+esac
+
+if ! echo "$FIRST_LINE" | grep -qE "^${REQUIRED_TYPE}\("; then
+    echo "ERROR [commit-msg]: Branch '$BRANCH_NAME' requires commit type '${REQUIRED_TYPE}'."
+    exit 1
+fi
+
+# On working branches, enforce <microservice-name>/<layer> format (at least one '/' in scope)
+if [ "$BRANCH_NAME" != "main" ] && [ "$BRANCH_NAME" != "master" ]; then
+    SCOPE_VALUE=$(echo "$FIRST_LINE" | sed -E 's/^[a-z]+\(([a-z0-9/-]+)\):.*/\1/')
+    if ! echo "$SCOPE_VALUE" | grep -qE "^[a-z0-9-]+/[a-z0-9-]+$"; then
+        echo "ERROR [commit-msg]: Scope '$SCOPE_VALUE' on working branches must follow '<microservice>/<layer>' (e.g., ingestion/backend)."
+        exit 1
+    fi
+fi
+
+echo "SUCCESS [commit-msg]: Commit message validated."
+exit 0

@@ -1,0 +1,99 @@
+#!/bin/sh
+
+if git rev-parse --verify HEAD >/dev/null 2>&1; then
+    against=HEAD
+else
+    against=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+fi
+
+echo "Running [pre-commit] checks..."
+
+# 1. Trailing whitespace check
+if ! git diff-index --check --cached "$against"; then
+    echo "ERROR [pre-commit]: Trailing whitespace detected. Clean up your files before committing."
+    exit 1
+fi
+
+# 2. Find Python interpreter
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+else
+    echo "ERROR [pre-commit]: Python interpreter not found in PATH."
+    exit 1
+fi
+
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+# 3. Private Keys / Credentials check (protect against accidental TLS/SSH key leaks)
+for file in $STAGED_FILES; do
+    if git show :"$file" | grep -qE "BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY"; then
+        echo "ERROR [pre-commit]: Private key detected in '$file'! Remove credentials/keys before committing."
+        exit 1
+    fi
+done
+
+# 4. JSON & YAML syntax validation
+for file in $(echo "$STAGED_FILES" | grep -E "\.json$"); do
+    git show :"$file" | $PYTHON_CMD -m json.tool >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo "ERROR [pre-commit]: Invalid JSON syntax in: $file"
+        exit 1
+    fi
+done
+
+for file in $(echo "$STAGED_FILES" | grep -E "\.(yml|yaml)$"); do
+    if $PYTHON_CMD -c "import yaml" >/dev/null 2>&1; then
+        git show :"$file" | $PYTHON_CMD -c "import sys, yaml; yaml.safe_load(sys.stdin.read())"
+        if [ $? -ne 0 ]; then
+            echo "ERROR [pre-commit]: Invalid YAML syntax in: $file"
+            exit 1
+        fi
+    fi
+done
+
+# 5. Python syntax check on staged files
+PY_FILES=$(echo "$STAGED_FILES" | grep "\.py$")
+if [ -n "$PY_FILES" ]; then
+    for file in $PY_FILES; do
+        git show :"$file" | $PYTHON_CMD -c "import sys; compile(sys.stdin.read(), '$file', 'exec')"
+        if [ $? -ne 0 ]; then
+            echo "ERROR [pre-commit]: Python syntax error in: $file"
+            exit 1
+        fi
+    done
+
+    # FUTURE IMPROVEMENT (FC-18 / QAS 7.3):
+    # Enable Ruff linting, formatting, and cyclomatic complexity checks once installed:
+    # ruff check $PY_FILES || exit 1
+fi
+
+# 6. Test naming standards (tests/ folders - FC-15)
+for file in $(echo "$STAGED_FILES" | grep -E "(^|/)tests/.*\.py$"); do
+    filename=$(basename "$file")
+    if [ "$filename" != "conftest.py" ] && ! echo "$filename" | grep -qE "^test_"; then
+        echo "ERROR [pre-commit]: Test file '$file' must start with 'test_' (except conftest.py)."
+        exit 1
+    fi
+
+    invalid_funcs=$(git show :"$file" | grep -E "^def " | grep -vE "^def (test_|__|fixture_)")
+    if [ -n "$invalid_funcs" ]; then
+        echo "ERROR [pre-commit]: Invalid function name in test file '$file' (must start with test_ or fixture_):"
+        echo "$invalid_funcs"
+        exit 1
+    fi
+done
+
+# 7. Forbidden incomplete tags in code files (excluding docs and markdown)
+FORBIDDEN_KEYWORDS="#TO""DO|#TO""FIX"
+for file in $(echo "$STAGED_FILES" | grep -vE "^docs/|\.md$"); do
+    if git show :"$file" | grep -Eniq "$FORBIDDEN_KEYWORDS"; then
+        echo "ERROR [pre-commit]: Forbidden tag (#TO""DO or #TO""FIX) found in staged file: $file"
+        git show :"$file" | grep -Eni "$FORBIDDEN_KEYWORDS"
+        exit 1
+    fi
+done
+
+echo "SUCCESS [pre-commit]: All code quality and security checks passed."
+exit 0
