@@ -1,0 +1,33 @@
+# Virtual environments locali
+myenv/
+venv/
+.venv/
+env/
+
+# Python / Pytest
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend
+node_modules/
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Editor & OS
+.DS_Store
+Thumbs.db
+
+# Dataset / file locali pesanti (se scarichi file PhysioNet in locale)
+*.dat
+*.hea
+*.atr
