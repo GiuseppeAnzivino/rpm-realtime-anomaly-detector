@@ -9,4 +9,5 @@ uvicorn>=0.29
 # HTTP client (needed by FastAPI's TestClient and for calls between services)
 httpx>=0.27
 
-# Service-specific dependencies: add them below, one per line
+# Database interaction
+sqlalchemy>=2.0,<3.0
