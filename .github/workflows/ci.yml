@@ -16,7 +16,7 @@ env:
 
 jobs:
   # ---------------------------------------------------------------
-  # Job 1: one run per microservice (matrix)
+  # Job 1: one run per Python microservice (matrix)
   # detect code -> checks -> tests with coverage -> build and push
   # of the image tagged ONLY with the commit SHA.
   # A service without source code is skipped, so the run stays green
@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # Keep this rule aligned with .github/scripts/check_tests.py:
       # the service is "empty" when src/ has no Python file besides __init__.py.
@@ -52,7 +52,7 @@ jobs:
 
       - name: Set up Python
         if: steps.detect.outputs.has_code == 'true'
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -95,7 +95,7 @@ jobs:
 
       - name: Log in to Docker Hub
         if: steps.detect.outputs.has_code == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -104,7 +104,7 @@ jobs:
       # by the publish-latest job, after the API tests have passed.
       - name: Build and push Docker image (SHA tag only)
         if: steps.detect.outputs.has_code == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: microservices/${{ matrix.service }}
           file: microservices/${{ matrix.service }}/Dockerfile
@@ -112,7 +112,77 @@ jobs:
           tags: ${{ env.DOCKERHUB_USERNAME }}/rpm-${{ matrix.service }}:${{ github.sha }}
 
   # ---------------------------------------------------------------
-  # Job 2: API tests on the whole stack, after all services are green.
+  # Job 2: frontend (React), separate from the Python matrix.
+  # detect -> install -> lint -> test -> build -> image (SHA tag only)
+  # The job is skipped until frontend/ has a package.json and a
+  # non-empty src/ folder.
+  # The scripts "lint", "test" and "build" must exist in package.json.
+  # ---------------------------------------------------------------
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Detect whether the frontend has source code
+        id: detect
+        run: |
+          if [ -f frontend/package.json ] && [ -n "$(find frontend/src -type f 2>/dev/null | head -n 1)" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No frontend code (package.json or src/ missing): checks and image build are skipped"
+          fi
+
+      # Align the Node version with the one used in frontend/Dockerfile
+      - name: Set up Node.js
+        if: steps.detect.outputs.has_code == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        run: npm run lint
+
+      # CI=true makes the test runner execute once instead of staying in watch mode
+      - name: Run tests
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        env:
+          CI: "true"
+        run: npm test
+
+      - name: Build
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        run: npm run build
+
+      - name: Log in to Docker Hub
+        if: steps.detect.outputs.has_code == 'true'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image (SHA tag only)
+        if: steps.detect.outputs.has_code == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: ${{ env.DOCKERHUB_USERNAME }}/rpm-frontend:${{ github.sha }}
+
+  # ---------------------------------------------------------------
+  # Job 3: API tests on the whole stack, after all services are green.
   # DISABLED for now (if: false). Before enabling it:
   #   - add a compose file that uses image: ...:${IMAGE_TAG:-latest}
   #   - set the real compose file, gateway port and health endpoint
@@ -121,7 +191,7 @@ jobs:
   # ---------------------------------------------------------------
   api-tests:
     if: false
-    needs: test-build-push
+    needs: [test-build-push, frontend]
     runs-on: ubuntu-latest
     env:
       # The stack must run the images built in this commit, not "latest"
@@ -129,7 +199,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Start the stack
         run: |
@@ -162,7 +232,7 @@ jobs:
         run: docker compose down -v
 
   # ---------------------------------------------------------------
-  # Job 3: assign "latest" to the images that passed the API tests.
+  # Job 4: assign "latest" to the images that passed the API tests.
   # No rebuild: the SHA-tagged image is retagged as latest.
   # It runs only if api-tests ran and succeeded, so while api-tests is
   # disabled no "latest" tag is published.
@@ -178,29 +248,42 @@ jobs:
           - detector-service
           - gateway-service
           - ingestion-service
+          - frontend
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Detect whether the service has source code
+      # Same rules used by the jobs that published the SHA-tagged images
+      - name: Detect whether an image was published for this service
         id: detect
         run: |
-          SRC_DIR="microservices/${{ matrix.service }}/src"
-          if [ -n "$(find "$SRC_DIR" -name '*.py' ! -name '__init__.py' 2>/dev/null | head -n 1)" ]; then
-            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.service }}" = "frontend" ]; then
+            if [ -f frontend/package.json ] && [ -n "$(find frontend/src -type f 2>/dev/null | head -n 1)" ]; then
+              HAS_CODE=true
+            else
+              HAS_CODE=false
+            fi
           else
-            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            SRC_DIR="microservices/${{ matrix.service }}/src"
+            if [ -n "$(find "$SRC_DIR" -name '*.py' ! -name '__init__.py' 2>/dev/null | head -n 1)" ]; then
+              HAS_CODE=true
+            else
+              HAS_CODE=false
+            fi
+          fi
+          echo "has_code=$HAS_CODE" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_CODE" = "false" ]; then
             echo "::notice::No source code in ${{ matrix.service }}: nothing to promote"
           fi
 
       - name: Set up Docker Buildx
         if: steps.detect.outputs.has_code == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
         if: steps.detect.outputs.has_code == 'true'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
