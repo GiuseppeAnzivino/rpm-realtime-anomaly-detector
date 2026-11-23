@@ -30,13 +30,8 @@ concurrency:
   cancel-in-progress: ${{ !inputs.publish }}
 
 env:
-  DOCKERHUB_USERNAME: giuseppeanzivino
+  DOCKERHUB_USERNAME: giuseppefabrizioanzivino
   COVERAGE_THRESHOLD: "80"
-  # API tests (DISABLED for now): change these in one place only
-  # COMPOSE_FILE: docker-compose.yml          # TODO: real compose file
-  # POSTMAN_COLLECTION: postman/collection.json   # TODO: real path
-  # POSTMAN_ENVIRONMENT: postman/ci.environment.json   # TODO: real path
-  # GATEWAY_URL: http://localhost:8080/health      # TODO: gateway port and health endpoint
 
 jobs:
   # ---------------------------------------------------------------

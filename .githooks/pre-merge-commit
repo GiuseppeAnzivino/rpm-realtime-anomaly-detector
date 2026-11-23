@@ -1,13 +1,3 @@
 #!/bin/sh
 
-echo "Running [pre-merge-commit] integrity check..."
-
-# MERGE_HEAD exists only during a true non-fast-forward merge
-if git rev-parse --quiet --verify MERGE_HEAD >/dev/null; then
-    echo "SUCCESS [pre-merge-commit]: Non-fast-forward merge verified."
-    exit 0
-else
-    echo "ERROR [pre-merge-commit]: Fast-forward merge detected and blocked!"
-    echo "Use 'git merge --no-ff <branch>' to preserve branch history."
-    exit 1
-fi
+echo "[pre-merge-commit] Executing a no-ff merge."

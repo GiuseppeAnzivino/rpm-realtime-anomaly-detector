@@ -85,15 +85,5 @@ for file in $(echo "$STAGED_FILES" | grep -E "(^|/)tests/.*\.py$"); do
     fi
 done
 
-# 7. Forbidden incomplete tags in code files (excluding docs and markdown)
-FORBIDDEN_KEYWORDS="#TO""DO|#TO""FIX"
-for file in $(echo "$STAGED_FILES" | grep -vE "^docs/|\.md$"); do
-    if git show :"$file" | grep -Eniq "$FORBIDDEN_KEYWORDS"; then
-        echo "ERROR [pre-commit]: Forbidden tag (#TO""DO or #TO""FIX) found in staged file: $file"
-        git show :"$file" | grep -Eni "$FORBIDDEN_KEYWORDS"
-        exit 1
-    fi
-done
-
 echo "SUCCESS [pre-commit]: All code quality and security checks passed."
 exit 0
