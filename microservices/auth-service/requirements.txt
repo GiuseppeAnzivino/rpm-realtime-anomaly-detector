@@ -7,8 +7,11 @@ fastapi>=0.110
 uvicorn>=0.29
 
 # HTTP client (needed by FastAPI's TestClient and for calls between services)
-httpx2
+httpx>=0.27
 
 # Database interaction
 sqlalchemy>=2.0,<3.0
 psycopg[binary]>=3.2
+
+# Password hashing (Argon2id)
+argon2-cffi>=23.1.0

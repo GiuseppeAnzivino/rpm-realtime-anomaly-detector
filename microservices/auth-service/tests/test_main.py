@@ -1,18 +1,39 @@
 """
 TEST SUITE (UNIT TESTS)
-    Description: Contains unit tests for validating the FastAPI application entrypoint and health-check endpoint of the Auth-Service microservice.
-    Responsibility: Verifies that the application exposes a functioning health endpoint and returns the expected HTTP status code and response payload.
-    Independence: Uses FastAPI's TestClient to test the application directly without requiring a running server or external infrastructure.
+    Description: Contains unit tests for validating the FastAPI application entrypoint, its lifecycle and the health-check endpoint of the Auth-Service microservice.
+    Responsibility: Verifies the startup sequence (database initialization and admin bootstrap), the shutdown cleanup, the failure modes caused by missing configuration, and the health endpoint response.
+    Independence: Uses FastAPI's TestClient with a temporary SQLite database, without requiring a running server or external infrastructure.
 """
 
-from fastapi.testclient import TestClient
+from unittest.mock import patch
 
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine as real_create_engine
+
+import main
+from business.security import verify_password
+from data.models import UserRole
+from data.repository import UserRepository
 from main import app
 
 
-#region Test Client Setup
+#region Fixtures
 
-client = TestClient(app)
+@pytest.fixture(name="database_url")
+def fixture_database_url(tmp_path, monkeypatch):
+    """Point DATABASE_URL to a temporary SQLite file database."""
+    url = f"sqlite:///{tmp_path / 'auth_test.db'}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    return url
+
+
+@pytest.fixture(name="admin_env")
+def fixture_admin_env(monkeypatch):
+    """Provide valid admin bootstrap credentials through the environment."""
+    monkeypatch.setenv("ADMIN_EMAIL", "Admin@Example.com")
+    monkeypatch.setenv("ADMIN_PASSWORD", "a-very-strong-password")
+    monkeypatch.setenv("ADMIN_FULL_NAME", "Root Admin")
 
 
 #endregion
@@ -24,14 +45,116 @@ def test_health_endpoint_returns_ok():
     """
         Verify that the health endpoint returns a successful response.
 
+        The client is used without a context manager, so the lifespan is not
+        executed and no database is required.
+
         Asserts:
             The endpoint responds with HTTP 200 and returns the expected
             status payload indicating that the service is healthy.
     """
+    client = TestClient(app)
+
     response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+#endregion
+
+
+#region Lifespan Tests
+
+def test_startup_initializes_database_and_creates_admin(database_url, admin_env):
+    """
+        Verify that startup creates the schema, the admin account and the app state.
+
+        Asserts:
+            The admin exists with the admin role and a correctly hashed
+            password, the engine and session factory are stored in the
+            application state, and the service answers requests.
+    """
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert app.state.engine is not None
+
+        with app.state.session_factory() as session:
+            admin = UserRepository(session).get_by_email("admin@example.com")
+
+        assert admin is not None
+        assert admin.role == UserRole.ADMIN
+        assert admin.password_hash != "a-very-strong-password"
+        assert verify_password("a-very-strong-password", admin.password_hash)
+
+
+def test_restart_does_not_duplicate_admin(database_url, admin_env):
+    """
+        Verify that restarting the application keeps a single admin account.
+
+        Asserts:
+            After two consecutive startups on the same database, the admin
+            still exists and keeps the same identifier.
+    """
+    with TestClient(app):
+        with app.state.session_factory() as session:
+            first_id = UserRepository(session).get_by_email("admin@example.com").user_id
+
+    with TestClient(app):
+        with app.state.session_factory() as session:
+            second_id = UserRepository(session).get_by_email("admin@example.com").user_id
+
+    assert first_id == second_id
+
+
+def test_shutdown_disposes_engine(database_url, admin_env):
+    """
+        Verify that the database engine is disposed when the application stops.
+
+        Asserts:
+            The engine's dispose method is called exactly once on shutdown.
+    """
+    created = []
+
+    def spy_create_engine(*args, **kwargs):
+        engine = real_create_engine(*args, **kwargs)
+        created.append(engine)
+        return engine
+
+    with patch.object(main, "create_engine", spy_create_engine):
+        with patch("sqlalchemy.engine.Engine.dispose", autospec=True) as dispose:
+            with TestClient(app):
+                pass
+
+    dispose.assert_called_once_with(created[0])
+
+
+def test_startup_fails_without_database_url(monkeypatch, admin_env):
+    """
+        Verify that startup fails when DATABASE_URL is not configured.
+
+        Asserts:
+            A RuntimeError is raised while the application starts.
+    """
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError):
+        with TestClient(app):
+            pass
+
+
+def test_startup_fails_without_admin_credentials(database_url, monkeypatch):
+    """
+        Verify that startup fails when the admin credentials are missing.
+
+        Asserts:
+            A RuntimeError is raised while the application starts.
+    """
+    monkeypatch.delenv("ADMIN_EMAIL", raising=False)
+    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
+
+    with pytest.raises(RuntimeError):
+        with TestClient(app):
+            pass
 
 
 #endregion
