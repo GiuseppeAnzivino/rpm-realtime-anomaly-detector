@@ -1,0 +1,145 @@
+name: Branch Checks
+
+# Verification of the working branches. It runs the same checks used by the
+# main pipeline (ci.yml) but never logs in to Docker Hub and never publishes
+# images, so it needs no secrets.
+on:
+  push:
+    branches-ignore:
+      - "main"
+
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the run still in progress
+concurrency:
+  group: branch-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep the same value used in ci.yml
+  COVERAGE_THRESHOLD: "80"
+
+jobs:
+  # ---------------------------------------------------------------
+  # Job 1: one run per Python microservice (matrix)
+  # detect code -> checks -> tests with coverage
+  # A service without source code is skipped.
+  # ---------------------------------------------------------------
+  python-checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth-service
+          - detector-service
+          - gateway-service
+          - ingestion-service
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Keep this rule aligned with .github/scripts/check_tests.py
+      - name: Detect whether the service has source code
+        id: detect
+        run: |
+          SRC_DIR="microservices/${{ matrix.service }}/src"
+          if [ -n "$(find "$SRC_DIR" -name '*.py' ! -name '__init__.py' 2>/dev/null | head -n 1)" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No source code in ${{ matrix.service }}: checks and tests are skipped"
+          fi
+
+      - name: Set up Python
+        if: steps.detect.outputs.has_code == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check requirements.txt and install dependencies
+        if: steps.detect.outputs.has_code == 'true'
+        run: |
+          REQ_FILE="microservices/${{ matrix.service }}/requirements.txt"
+
+          if [ ! -s "$REQ_FILE" ]; then
+            echo "::error::$REQ_FILE is missing or empty"
+            exit 1
+          fi
+
+          for PKG in pytest pytest-cov; do
+            if ! grep -qiE "^[[:space:]]*${PKG}([^A-Za-z0-9_-]|\$)" "$REQ_FILE"; then
+              echo "::error::$PKG is not listed in $REQ_FILE"
+              exit 1
+            fi
+          done
+
+          pip install --upgrade pip
+          pip install -r "$REQ_FILE"
+
+      - name: Verify that every source file has a test file
+        if: steps.detect.outputs.has_code == 'true'
+        run: python .github/scripts/check_tests.py "microservices/${{ matrix.service }}"
+
+      - name: Run unit tests with coverage
+        if: steps.detect.outputs.has_code == 'true'
+        env:
+          PYTHONPATH: microservices/${{ matrix.service }}/src
+        run: |
+          pytest "microservices/${{ matrix.service }}/tests" \
+            --cov="microservices/${{ matrix.service }}/src" \
+            --cov-report=term-missing \
+            --cov-fail-under=${{ env.COVERAGE_THRESHOLD }}
+
+  # ---------------------------------------------------------------
+  # Job 2: frontend (React)
+  # detect -> install -> lint -> test -> build
+  # Skipped until frontend/ has a package.json and a non-empty src/.
+  # ---------------------------------------------------------------
+  frontend-checks:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Detect whether the frontend has source code
+        id: detect
+        run: |
+          if [ -f frontend/package.json ] && [ -n "$(find frontend/src -type f 2>/dev/null | head -n 1)" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No frontend code (package.json or src/ missing): checks are skipped"
+          fi
+
+      # Align the Node version with the one used in ci.yml and frontend/Dockerfile
+      - name: Set up Node.js
+        if: steps.detect.outputs.has_code == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Run tests
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        env:
+          CI: "true"
+        run: npm test
+
+      - name: Build
+        if: steps.detect.outputs.has_code == 'true'
+        working-directory: frontend
+        run: npm run build

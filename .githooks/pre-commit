@@ -72,8 +72,14 @@ fi
 # 6. Test naming standards (tests/ folders - FC-15)
 for file in $(echo "$STAGED_FILES" | grep -E "(^|/)tests/.*\.py$"); do
     filename=$(basename "$file")
+
+    # Package markers are not test modules
+    if [ "$filename" = "__init__.py" ]; then
+        continue
+    fi
+
     if [ "$filename" != "conftest.py" ] && ! echo "$filename" | grep -qE "^test_"; then
-        echo "ERROR [pre-commit]: Test file '$file' must start with 'test_' (except conftest.py)."
+        echo "ERROR [pre-commit]: Test file '$file' must start with 'test_' (except conftest.py and __init__.py)."
         exit 1
     fi
 

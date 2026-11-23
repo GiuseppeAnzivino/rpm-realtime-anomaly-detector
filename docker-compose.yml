@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: rpm-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rpm_user}
+      # No default: the password must be set in the root .env (see .env.example)
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env file}
+      POSTGRES_DB: ${POSTGRES_DB:-rpm_auth_db}
+    ports:
+      # Reachable only from this machine
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rpm_user} -d ${POSTGRES_DB:-rpm_auth_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  auth-service:
+    build:
+      context: ./microservices/auth-service
+      dockerfile: Dockerfile
+    container_name: rpm-auth-service
+    # Variables specific to this service (JWT settings, initial admin account)
+    env_file:
+      - ./microservices/auth-service/.env
+    environment:
+      # Built from the shared database variables of the root .env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-rpm_user}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env file}@postgres:5432/${POSTGRES_DB:-rpm_auth_db}
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # The slim image has no curl, so the check uses Python
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
