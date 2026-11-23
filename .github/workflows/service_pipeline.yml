@@ -1,0 +1,445 @@
+name: Service pipeline
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Service name (auth-service, ..., frontend)"
+        type: string
+        required: true
+      kind:
+        description: "python or frontend"
+        type: string
+        required: true
+      path:
+        description: "Service folder (microservices/auth-service, frontend, ...)"
+        type: string
+        required: true
+      publish:
+        description: "true = also publish images (main). false = checks only (other branches)"
+        type: boolean
+        required: false
+        default: true
+
+# Publishing runs (main): one at a time PER SERVICE, queued, never cancelled:
+# the registry state (latest / previous) must not be changed by two runs in
+# parallel. Check-only runs (other branches): a new push to the same branch
+# cancels the run in progress, and they never block the publishing runs.
+concurrency:
+  group: ${{ inputs.publish && format('ci-{0}', inputs.service) || format('checks-{0}-{1}', github.ref, inputs.service) }}
+  cancel-in-progress: ${{ !inputs.publish }}
+
+env:
+  DOCKERHUB_USERNAME: giuseppeanzivino
+  COVERAGE_THRESHOLD: "80"
+  # API tests (DISABLED for now): change these in one place only
+  # COMPOSE_FILE: docker-compose.yml          # TODO: real compose file
+  # POSTMAN_COLLECTION: postman/collection.json   # TODO: real path
+  # POSTMAN_ENVIRONMENT: postman/ci.environment.json   # TODO: real path
+  # GATEWAY_URL: http://localhost:8080/health      # TODO: gateway port and health endpoint
+
+jobs:
+  # ---------------------------------------------------------------
+  # Job 1: detect. Decides what this run has to do. No manual switches.
+  #   has_code       -> this service has source code
+  # (API tests detection is commented out for now, see below)
+  # ---------------------------------------------------------------
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_code: ${{ steps.detect.outputs.has_code }}
+      # has_api_tests: ${{ steps.detect.outputs.has_api_tests }}
+      # stack_services: ${{ steps.detect.outputs.stack_services }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Keep the Python rule aligned with .github/scripts/check_tests.py:
+      # a service is "empty" when src/ has no Python file besides __init__.py.
+      - name: Detect code and API test prerequisites
+        id: detect
+        env:
+          SERVICE: ${{ inputs.service }}
+          KIND: ${{ inputs.kind }}
+          SERVICE_PATH: ${{ inputs.path }}
+        run: |
+          has_py() {
+            [ -n "$(find "microservices/$1/src" -name '*.py' ! -name '__init__.py' 2>/dev/null | head -n 1)" ]
+          }
+          has_fe() {
+            [ -f frontend/package.json ] && [ -n "$(find frontend/src -type f 2>/dev/null | head -n 1)" ]
+          }
+
+          # 1. Does THIS service have code?
+          HAS_CODE=false
+          if [ "$KIND" = "frontend" ]; then
+            has_fe && HAS_CODE=true
+          else
+            has_py "$SERVICE" && HAS_CODE=true
+          fi
+          echo "has_code=$HAS_CODE" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_CODE" = "false" ]; then
+            echo "::notice::No source code in $SERVICE: nothing to do"
+          fi
+
+          # # 2. Which services have code (= can be started in the stack)?
+          # STACK=""
+          # for S in auth-service detector-service gateway-service ingestion-service; do
+          #   has_py "$S" && STACK="$STACK $S"
+          # done
+          # has_fe && STACK="$STACK frontend"
+          # STACK=$(echo $STACK)
+          # echo "stack_services=$STACK" >> "$GITHUB_OUTPUT"
+          # echo "Services with code: ${STACK:-<none>}"
+
+          # # 3. Can the API tests run? Gateway code + compose + collection.
+          # if has_py gateway-service && [ -f "$COMPOSE_FILE" ] \
+          #    && [ -f "$POSTMAN_COLLECTION" ] && [ -f "$POSTMAN_ENVIRONMENT" ]; then
+          #   echo "has_api_tests=true" >> "$GITHUB_OUTPUT"
+          # else
+          #   echo "has_api_tests=false" >> "$GITHUB_OUTPUT"
+          #   echo "::notice::API tests skipped (gateway code, compose file or Postman files missing)"
+          # fi
+
+  # ---------------------------------------------------------------
+  # Job 2: test. Unit tests of this service (Python or frontend).
+  # ---------------------------------------------------------------
+  test:
+    needs: detect
+    if: needs.detect.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # ---------- Python ----------
+      - name: Set up Python
+        if: inputs.kind == 'python'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Check requirements.txt and install dependencies
+        if: inputs.kind == 'python'
+        run: |
+          REQ_FILE="${{ inputs.path }}/requirements.txt"
+
+          if [ ! -s "$REQ_FILE" ]; then
+            echo "::error::$REQ_FILE is missing or empty"
+            exit 1
+          fi
+
+          for PKG in pytest pytest-cov; do
+            if ! grep -qiE "^[[:space:]]*${PKG}([^A-Za-z0-9_-]|\$)" "$REQ_FILE"; then
+              echo "::error::$PKG is not listed in $REQ_FILE"
+              exit 1
+            fi
+          done
+
+          pip install --upgrade pip
+          pip install -r "$REQ_FILE"
+
+      - name: Verify that every source file has a test file
+        if: inputs.kind == 'python'
+        run: python .github/scripts/check_tests.py "${{ inputs.path }}"
+
+      # pytest exits with an error if it collects no tests. --cov-fail-under
+      # fails the step when the tests execute less code than the threshold.
+      - name: Run unit tests with coverage
+        if: inputs.kind == 'python'
+        env:
+          PYTHONPATH: ${{ inputs.path }}/src
+        run: |
+          pytest "${{ inputs.path }}/tests" \
+            --cov="${{ inputs.path }}/src" \
+            --cov-report=term-missing \
+            --cov-fail-under=${{ env.COVERAGE_THRESHOLD }}
+
+      # ---------- Frontend ----------
+      # Align the Node version with the one used in frontend/Dockerfile
+      - name: Set up Node.js
+        if: inputs.kind == 'frontend'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        if: inputs.kind == 'frontend'
+        working-directory: ${{ inputs.path }}
+        run: npm ci
+
+      - name: Lint
+        if: inputs.kind == 'frontend'
+        working-directory: ${{ inputs.path }}
+        run: npm run lint
+
+      # CI=true makes the test runner execute once instead of watch mode
+      - name: Run unit tests
+        if: inputs.kind == 'frontend'
+        working-directory: ${{ inputs.path }}
+        env:
+          CI: "true"
+        run: npm test
+
+      - name: Build check
+        if: inputs.kind == 'frontend'
+        working-directory: ${{ inputs.path }}
+        run: npm run build
+
+      # Runs even when the tests fail: no test result is left on the runner.
+      - name: Remove test results and build output
+        if: always()
+        run: |
+          cd "${{ inputs.path }}"
+          rm -rf .coverage .coverage.* coverage.xml htmlcov .pytest_cache \
+                 coverage test-results junit.xml dist build
+          find . \( -name '__pycache__' -o -name '.pytest_cache' \) \
+            -prune -exec rm -rf {} + 2>/dev/null || true
+
+  # ---------------------------------------------------------------
+  # Job 3: publish. Build and publish the image of this service.
+  #   - the current registry state is recorded (artifact, 1 day)
+  #   - the current "latest" becomes "previous" (if there is one)
+  #   - the new image is built and pushed as "latest"
+  # ---------------------------------------------------------------
+  publish:
+    needs: [detect, test]
+    if: inputs.publish && needs.detect.outputs.has_code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Digests of the tags as they are BEFORE this run, used by the rollback.
+      # An empty value means "the tag does not exist yet". A registry error
+      # other than "not found" stops the job, so a network problem is never
+      # mistaken for "no image yet".
+      - name: Record the current registry state
+        id: state
+        run: |
+          IMAGE="${{ env.DOCKERHUB_USERNAME }}/rpm-${{ inputs.service }}"
+
+          get_digest() {
+            local out
+            if out=$(docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>&1); then
+              echo "$out"
+            elif echo "$out" | grep -qiE 'not found|manifest unknown|404'; then
+              echo ""
+            else
+              echo "::error::Cannot inspect $1: $out" >&2
+              return 1
+            fi
+          }
+
+          OLD_LATEST=$(get_digest "$IMAGE:latest")
+          OLD_PREVIOUS=$(get_digest "$IMAGE:previous")
+          echo "latest   = ${OLD_LATEST:-<none>}"
+          echo "previous = ${OLD_PREVIOUS:-<none>}"
+
+          mkdir -p "$RUNNER_TEMP/state"
+          jq -n --arg l "$OLD_LATEST" --arg p "$OLD_PREVIOUS" \
+            '{latest: $l, previous: $p}' > "$RUNNER_TEMP/state/${{ inputs.service }}.json"
+
+          echo "old_latest=$OLD_LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Save the registry state for a possible rollback
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-state-${{ inputs.service }}
+          path: ${{ runner.temp }}/state/${{ inputs.service }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+      # No previous image yet -> nothing to do: the new image is just "latest".
+      - name: Current latest becomes previous
+        if: steps.state.outputs.old_latest != ''
+        run: |
+          IMAGE="${{ env.DOCKERHUB_USERNAME }}/rpm-${{ inputs.service }}"
+          docker buildx imagetools create \
+            --tag "$IMAGE:previous" \
+            "$IMAGE@${{ steps.state.outputs.old_latest }}"
+
+      - name: Build and push Docker image as latest
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ inputs.path }}
+          file: ${{ inputs.path }}/Dockerfile
+          push: true
+          tags: ${{ env.DOCKERHUB_USERNAME }}/rpm-${{ inputs.service }}:latest
+
+# DISABLED for now: uncomment (and re-add the commented parts above) when ready.
+#   # ---------------------------------------------------------------
+#   # Job 4: api-tests. API tests on the whole stack, with the image just
+#   # published for THIS service and "latest" for all the others.
+#   # It runs by itself when the gateway has code and the compose file
+#   # and the Postman files exist. Only services that have code are
+#   # started, so empty services never break "docker compose pull".
+#   # Prerequisite: in the compose file the service names are the same
+#   # as the folder names, and the images are
+#   #   image: giuseppeanzivino/rpm-<service>:${IMAGE_TAG:-latest}
+#   # ---------------------------------------------------------------
+#   api-tests:
+#     needs: [detect, publish]
+#     if: needs.detect.outputs.has_code == 'true' && needs.detect.outputs.has_api_tests == 'true'
+#     runs-on: ubuntu-latest
+#     env:
+#       IMAGE_TAG: latest
+#       STACK_SERVICES: ${{ needs.detect.outputs.stack_services }}
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@v6
+#
+#       - name: Log in to Docker Hub
+#         uses: docker/login-action@v4
+#         with:
+#           username: ${{ env.DOCKERHUB_USERNAME }}
+#           password: ${{ secrets.DOCKERHUB_TOKEN }}
+#
+#       - name: Start the stack
+#         run: |
+#           docker compose pull $STACK_SERVICES
+#           docker compose up -d $STACK_SERVICES
+#
+#       - name: Wait for the gateway
+#         run: |
+#           for i in $(seq 1 30); do
+#             if curl -sf "$GATEWAY_URL"; then
+#               exit 0
+#             fi
+#             sleep 2
+#           done
+#           echo "::error::Gateway not ready after 60 seconds"
+#           docker compose logs
+#           exit 1
+#
+#       - name: Run Postman collections
+#         run: |
+#           npm install -g newman
+#           newman run "$POSTMAN_COLLECTION" -e "$POSTMAN_ENVIRONMENT"
+#
+#       - name: Show logs on failure
+#         if: failure()
+#         run: docker compose logs
+#
+#       # Runs always: the test environment and the reports are removed.
+#       - name: Remove the test environment and the reports
+#         if: always()
+#         run: |
+#           docker compose down -v --rmi local --remove-orphans
+#           rm -rf newman
+
+  # ---------------------------------------------------------------
+  # Job 5: rollback. Runs if publish failed (or was cancelled).
+  # (when API tests are enabled again: add api-tests to needs and to the if)
+  # It restores "latest" and "previous" of THIS service to the digests
+  # recorded before this run. A tag that did not exist before is
+  # deleted. The workflow stays red because the failed job is still
+  # failed. Needs a Docker Hub token with the Delete permission.
+  # ---------------------------------------------------------------
+  rollback:
+    needs: [publish]
+    if: always() && inputs.publish && (needs.publish.result == 'failure' || needs.publish.result == 'cancelled')
+    # needs: [publish, api-tests]
+    # if: >-
+    #   always() && (
+    #   needs.publish.result == 'failure' || needs.publish.result == 'cancelled'
+    #   || needs.api-tests.result == 'failure' || needs.api-tests.result == 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # No artifact = the job failed before touching the registry:
+      # nothing to restore.
+      - name: Download the saved registry state
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: promotion-state-${{ inputs.service }}
+          path: ${{ runner.temp }}/state
+
+      - name: Restore latest and previous
+        env:
+          HUB_USER: ${{ env.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          STATE="$RUNNER_TEMP/state/${{ inputs.service }}.json"
+          if [ ! -f "$STATE" ]; then
+            echo "::notice::No saved state for ${{ inputs.service }}: nothing to restore"
+            exit 0
+          fi
+
+          IMAGE="$HUB_USER/rpm-${{ inputs.service }}"
+          OLD_LATEST=$(jq -r .latest "$STATE")
+          OLD_PREVIOUS=$(jq -r .previous "$STATE")
+
+          # The tag did not exist before this run: delete it.
+          # 204 = deleted, 404 = already absent.
+          delete_tag() {
+            local jwt code
+            jwt=$(jq -n --arg u "$HUB_USER" --arg p "$HUB_TOKEN" '{username:$u,password:$p}' \
+              | curl -s -H "Content-Type: application/json" -d @- https://hub.docker.com/v2/users/login \
+              | jq -r .token)
+            if [ -z "$jwt" ] || [ "$jwt" = "null" ]; then
+              echo "::error::Docker Hub login failed"
+              return 1
+            fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+              -H "Authorization: JWT $jwt" \
+              "https://hub.docker.com/v2/repositories/$IMAGE/tags/$1/")
+            echo "delete $IMAGE:$1 -> HTTP $code"
+            [ "$code" = "204" ] || [ "$code" = "404" ]
+          }
+
+          restore_tag() {
+            if [ -n "$2" ]; then
+              echo "restore $IMAGE:$1 -> $2"
+              docker buildx imagetools create --tag "$IMAGE:$1" "$IMAGE@$2"
+            else
+              delete_tag "$1"
+            fi
+          }
+
+          restore_tag latest "$OLD_LATEST"
+          restore_tag previous "$OLD_PREVIOUS"
+
+  # ---------------------------------------------------------------
+  # Job 6: cleanup. Always runs at the end and removes the temporary state
+  # artifact of THIS service (other services' artifacts are untouched,
+  # because their rollback might still need them).
+  # ---------------------------------------------------------------
+  cleanup:
+    needs: [publish, rollback]   # add api-tests when enabled
+    if: always() && inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete the temporary state artifact of this service
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          ARTIFACT_NAME: promotion-state-${{ inputs.service }}
+        run: |
+          gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" \
+            --jq ".artifacts[] | select(.name == \"$ARTIFACT_NAME\") | .id" \
+          | while read -r ID; do
+              gh api -X DELETE "repos/$REPO/actions/artifacts/$ID" \
+                && echo "deleted artifact $ID"
+            done
