@@ -1,18 +1,20 @@
 """
-DATA ACCESS LAYER (REPOSITORY)
-Description: Implements the Repository pattern for managing user accounts in the Auth-Service microservice.
-Responsibility: Handles persistence operations on User entities through SQLAlchemy, including creation, retrieval, updates, and deletion.
+DATA ACCESS LAYER (REPOSITORIES)
+Description: Implements the Repository pattern for the persistent entities of the Auth-Service microservice: user accounts and refresh tokens.
+Responsibility: Handles persistence operations on User and RefreshToken entities through SQLAlchemy, including creation, retrieval, updates, deletion and token revocation.
 Independence: Encapsulates database access and translates data integrity violations into application-level exceptions, preventing the business logic layer from depending directly on persistence details.
 """
 
 import uuid
+from datetime import datetime
+from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from business.exceptions import DuplicateEmailError, UserNotFoundError
-from data.models import User, UserRole
+from data.models import RefreshToken, User, UserRole
 
 
 #region Email Normalization
@@ -308,6 +310,97 @@ class UserRepository:
                     "A user with this email already exists"
                 ) from error
             raise
+
+    #endregion
+
+#endregion
+
+
+#region Refresh Token Repository
+
+class RefreshTokenRepository:
+    """
+        Encapsulates persistence operations for RefreshToken records.
+
+        The repository operates on a SQLAlchemy session provided by the caller
+        and commits each write operation individually. It never sees the
+        plaintext token, only its SHA-256 hash.
+    """
+
+    def __init__(self, session: Session) -> None:
+        """
+            Initialize the repository with a SQLAlchemy session.
+
+            Args:
+                session: The database session used for persistence operations.
+        """
+        self._session = session
+
+    #region Creation and Retrieval
+
+    def add(self, token: RefreshToken) -> RefreshToken:
+        """
+            Persist a new refresh token and return it with generated fields populated.
+
+            Args:
+                token: The refresh token entity to persist.
+
+            Returns:
+                The persisted token with its generated fields populated.
+
+            Raises:
+                IntegrityError: If a database constraint is violated.
+        """
+        self._session.add(token)
+        self._session.commit()
+        self._session.refresh(token)
+        return token
+
+    def get_by_hash(self, token_hash: str) -> RefreshToken | None:
+        """
+            Retrieve a refresh token by the SHA-256 hash of its value.
+
+            Args:
+                token_hash: The hexadecimal SHA-256 hash of the token.
+
+            Returns:
+                The matching token, or ``None`` if no token exists.
+        """
+        statement = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        return self._session.scalar(statement)
+
+    #endregion
+
+    #region Revocation
+
+    def revoke(self, token_hash: str, revoked_at: datetime) -> bool:
+        """
+            Revoke a refresh token that is not yet revoked.
+
+            The operation is a single conditional UPDATE, so it is atomic: if two
+            requests revoke the same token concurrently, only one of them gets
+            ``True``. Revoking an unknown or already revoked token is not an
+            error and leaves the stored data untouched.
+
+            Args:
+                token_hash: The hexadecimal SHA-256 hash of the token.
+                revoked_at: The revocation time to store.
+
+            Returns:
+                ``True`` if this call revoked the token, ``False`` if the token
+                does not exist or was already revoked.
+        """
+        statement = (
+            update(RefreshToken)
+            .where(
+                RefreshToken.token_hash == token_hash,
+                RefreshToken.revoked_at.is_(None),
+            )
+            .values(revoked_at=revoked_at)
+        )
+        result = cast(CursorResult, self._session.execute(statement))
+        self._session.commit()
+        return result.rowcount == 1
 
     #endregion
 

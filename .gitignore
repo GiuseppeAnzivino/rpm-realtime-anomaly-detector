@@ -31,3 +31,6 @@ Thumbs.db
 *.dat
 *.hea
 *.atr
+
+# TLS Configuration
+caddy-root.crt

@@ -41,3 +41,32 @@ class UserNotFoundError(DataLayerError):
 
 
 #endregion
+
+
+#region Authentication-related business exceptions
+
+class AuthenticationError(Exception):
+    """
+        Base exception for authentication failures.
+
+        Allows the upper layers to handle every authentication error in a single
+        place, without listing each specific exception.
+    """
+
+
+class InvalidCredentialsError(AuthenticationError):
+    """
+        Raised when a login attempt fails.
+
+        The message never reveals whether the email or the password was wrong,
+        nor whether the account exists or is disabled.
+    """
+
+
+class InvalidTokenError(AuthenticationError):
+    """
+        Raised when an access token is malformed, expired, forged or of the wrong type.
+    """
+
+
+#endregion

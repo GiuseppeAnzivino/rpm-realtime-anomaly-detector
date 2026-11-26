@@ -41,5 +41,23 @@ services:
       timeout: 5s
       retries: 5
 
+  # Optional HTTPS reverse proxy: starts only with `--profile tls`.
+  # Caddy terminates TLS and forwards plain HTTP to the service on the
+  # internal Docker network. When the gateway exists, point the Caddyfile
+  # to gateway-service and change depends_on accordingly.
+  proxy:
+    image: caddy:2
+    container_name: rpm-proxy
+    profiles: ["tls"]
+    ports:
+      - "8443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      auth-service:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  caddy_data:
