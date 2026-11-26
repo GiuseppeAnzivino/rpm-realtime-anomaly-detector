@@ -1,10 +1,11 @@
 """
 TEST SUITE (JWT TOKEN VALIDATION TESTS)
-    Description: Verifies JWT configuration, access token generation, expiration, signature validation, and token claim handling.
-    Responsibility: Ensures token settings are correctly loaded, access tokens are generated with the expected claims and lifetime, and invalid or expired tokens are rejected.
+    Description: Verifies JWT configuration, access token generation, expiration, signature validation, token claim handling and refresh token generation and hashing.
+    Responsibility: Ensures token settings are correctly loaded, access tokens are generated with the expected claims and lifetime, invalid or expired tokens are rejected, and refresh tokens are random and hashed with SHA-256.
     Independence: Isolated unit tests that validate token-related business logic without requiring application startup, database access, or external services.
 """
 
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -17,7 +18,9 @@ from business.tokens import (
     TokenSettings,
     create_access_token,
     decode_access_token,
+    generate_refresh_token,
     get_token_settings,
+    hash_refresh_token,
 )
 
 
@@ -59,10 +62,12 @@ def test_default_settings(monkeypatch):
     """
     monkeypatch.setenv("JWT_SECRET", SECRET)
     monkeypatch.delenv("ACCESS_TOKEN_MINUTES", raising=False)
+    monkeypatch.delenv("REFRESH_TOKEN_DAYS", raising=False)
     settings = get_token_settings()
     assert settings.jwt_secret == SECRET
     assert settings.jwt_algorithm == "HS256"
     assert settings.access_token_minutes == 15
+    assert settings.refresh_token_days == 7
 
 
 def test_access_token_minutes_override(monkeypatch):
@@ -74,6 +79,17 @@ def test_access_token_minutes_override(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", SECRET)
     monkeypatch.setenv("ACCESS_TOKEN_MINUTES", "5")
     assert get_token_settings().access_token_minutes == 5
+
+
+def test_refresh_token_days_override(monkeypatch):
+    """Verify that the refresh token lifetime can be overridden through the environment.
+
+        Args:
+            monkeypatch: Pytest fixture used to control environment variables.
+    """
+    monkeypatch.setenv("JWT_SECRET", SECRET)
+    monkeypatch.setenv("REFRESH_TOKEN_DAYS", "30")
+    assert get_token_settings().refresh_token_days == 30
 
 #endregion
 
@@ -135,5 +151,37 @@ def test_invalid_token_is_an_authentication_error():
     """Verify that invalid JWTs are surfaced as authentication errors."""
     with pytest.raises(AuthenticationError):
         decode_access_token("not-a-jwt", SETTINGS)
+
+#endregion
+
+
+#region Refresh Token Tests
+def test_generate_refresh_token_is_long_and_url_safe():
+    """Verify that a generated refresh token has enough entropy and only URL-safe characters."""
+    token = generate_refresh_token()
+    assert len(token) >= 43
+    assert token.replace("-", "").replace("_", "").isalnum()
+
+
+def test_generate_refresh_token_returns_different_tokens():
+    """Verify that two generated refresh tokens are never the same."""
+    assert generate_refresh_token() != generate_refresh_token()
+
+
+def test_hash_refresh_token_is_the_sha256_hex_digest():
+    """Verify that the refresh token hash is the 64-character SHA-256 hex digest of the token."""
+    expected = hashlib.sha256("my-token".encode("utf-8")).hexdigest()
+    assert hash_refresh_token("my-token") == expected
+    assert len(expected) == 64
+
+
+def test_hash_refresh_token_is_deterministic():
+    """Verify that hashing the same refresh token twice gives the same value."""
+    assert hash_refresh_token("my-token") == hash_refresh_token("my-token")
+
+
+def test_hash_refresh_token_differs_for_different_tokens():
+    """Verify that different refresh tokens have different hashes."""
+    assert hash_refresh_token("token-a") != hash_refresh_token("token-b")
 
 #endregion

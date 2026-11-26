@@ -22,15 +22,22 @@ class LogoutRequest(BaseModel):
 
     refresh_token: str = Field(min_length=1)
 
+
+class RefreshRequest(BaseModel):
+    """The refresh token sent to the refresh endpoint."""
+
+    refresh_token: str = Field(min_length=1)
+
 #endregion
 
 
 #region Response Models
 
 class TokenResponse(BaseModel):
-    """The tokens returned by a successful login."""
+    """The tokens returned by a successful login or refresh."""
 
     access_token: str
+    refresh_token: str
     token_type: str = "bearer"
     expires_in: int
 

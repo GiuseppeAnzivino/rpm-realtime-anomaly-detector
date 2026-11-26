@@ -10,12 +10,14 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+import hashlib, secrets
 import jwt
 
 from business.exceptions import InvalidTokenError
 
 ACCESS_TOKEN_TYPE = "access"
 MIN_SECRET_LENGTH = 32
+REFRESH_TOKEN_BYTES = 32
 
 
 #region Token Settings
@@ -34,6 +36,7 @@ class TokenSettings:
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = 15
+    refresh_token_days: int = 7
 
 
 def get_token_settings() -> TokenSettings:
@@ -59,6 +62,7 @@ def get_token_settings() -> TokenSettings:
     return TokenSettings(
         jwt_secret=secret,
         access_token_minutes=int(os.environ.get("ACCESS_TOKEN_MINUTES", "15")),
+        refresh_token_days=int(os.environ.get("REFRESH_TOKEN_DAYS", "7")),
     )
 
 #endregion
@@ -125,5 +129,37 @@ def decode_access_token(token: str, settings: TokenSettings) -> dict:
     if claims.get("type") != ACCESS_TOKEN_TYPE:
         raise InvalidTokenError("Wrong token type")
     return claims
+
+#endregion
+
+#region Refresh Tokens
+
+def generate_refresh_token() -> str:
+    """
+        Generate a new opaque refresh token.
+
+        The token is random and carries no data: it is only meaningful because
+        its hash is stored in the database.
+
+        Returns:
+            A URL-safe random string.
+    """
+    return secrets.token_urlsafe(REFRESH_TOKEN_BYTES)
+
+
+def hash_refresh_token(token: str) -> str:
+    """
+        Compute the SHA-256 hash under which a refresh token is stored.
+
+        SHA-256 is enough here (no Argon2) because the token is long and random,
+        so it cannot be guessed or brute-forced like a password.
+
+        Args:
+            token: The plaintext refresh token.
+
+        Returns:
+            The hash as 64 hexadecimal characters.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 #endregion

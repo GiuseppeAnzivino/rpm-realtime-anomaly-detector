@@ -1,8 +1,8 @@
 """
 TEST SUITE (AUTHENTICATION API INTEGRATION TESTS)
     Description: Validates the authentication API endpoints through HTTP requests using the FastAPI test client.
-    Responsibility: Ensures login requests produce valid access tokens, invalid credentials return the expected HTTP responses, credential validation prevents malformed requests, and logout behaves as expected.
-    Independence: Integration tests exercise the real API routes, authentication service, repository, and database using an isolated in-memory SQLite database without external infrastructure.
+    Responsibility: Ensures login produces access and refresh tokens, refresh rotates them, logout revokes them, invalid credentials or tokens return the expected HTTP responses, and malformed requests are rejected.
+    Independence: Integration tests exercise the real API routes, authentication service, repositories, and database using an isolated in-memory SQLite database without external infrastructure.
 """
 
 import pytest
@@ -68,6 +68,19 @@ def fixture_client():
     yield TestClient(app)
     engine.dispose()
 
+
+@pytest.fixture(name="login_body")
+def fixture_login_body(client):
+    """Log in the active account and provide the JSON body of the response.
+
+        Args:
+            client: FastAPI test client used to submit the login request.
+    """
+    response = client.post(
+        "/auth/login", json={"email": "mario@example.com", "password": PASSWORD}
+    )
+    return response.json()
+
 #endregion
 
 
@@ -83,6 +96,15 @@ def test_login_returns_a_valid_access_token(client):
     assert body["token_type"] == "bearer"
     assert body["expires_in"] == 15 * 60
     assert decode_access_token(body["access_token"], SETTINGS)["role"] == "clinician"
+
+
+def test_login_returns_a_refresh_token(login_body):
+    """Verify that successful login also returns a non-empty refresh token.
+
+        Args:
+            login_body: JSON body returned by a successful login.
+    """
+    assert login_body["refresh_token"]
 
 
 def test_login_email_is_case_insensitive(client):
@@ -136,10 +158,99 @@ def test_login_with_invalid_body_returns_422(client):
 #endregion
 
 
+#region Refresh Endpoint Tests
+def test_refresh_returns_a_new_token_pair(client, login_body):
+    """Verify that refreshing returns a valid access token and a different refresh token.
+
+        Args:
+            client: FastAPI test client used to submit the refresh request.
+            login_body: JSON body returned by a successful login.
+    """
+    response = client.post(
+        "/auth/refresh", json={"refresh_token": login_body["refresh_token"]}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token_type"] == "bearer"
+    assert body["expires_in"] == 15 * 60
+    assert body["refresh_token"] != login_body["refresh_token"]
+    assert decode_access_token(body["access_token"], SETTINGS)["role"] == "clinician"
+
+
+def test_refresh_with_a_reused_token_returns_401(client, login_body):
+    """Verify that a refresh token that was already rotated is rejected with HTTP 401.
+
+        Args:
+            client: FastAPI test client used to submit the refresh requests.
+            login_body: JSON body returned by a successful login.
+    """
+    client.post("/auth/refresh", json={"refresh_token": login_body["refresh_token"]})
+
+    response = client.post(
+        "/auth/refresh", json={"refresh_token": login_body["refresh_token"]}
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid refresh token"
+
+
+def test_refresh_with_an_unknown_token_returns_401(client):
+    """Verify that a refresh token that was never issued is rejected with HTTP 401."""
+    response = client.post("/auth/refresh", json={"refresh_token": "unknown"})
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid refresh token"
+
+
+def test_refresh_without_a_token_returns_422(client):
+    """Verify that a refresh request without a token is rejected with HTTP 422."""
+    assert client.post("/auth/refresh", json={}).status_code == 422
+
+#endregion
+
+
 #region Logout Endpoint Tests
-# Remove this test if the placeholder logout endpoint is no longer part of the API.
-def test_logout_placeholder_returns_204(client):
-    """Verify that the placeholder logout endpoint returns HTTP 204 No Content."""
-    assert client.post("/auth/logout").status_code == 204
+def test_logout_returns_204_and_revokes_the_refresh_token(client, login_body):
+    """Verify that logout returns HTTP 204 and the revoked token can no longer be refreshed.
+
+        Args:
+            client: FastAPI test client used to submit the requests.
+            login_body: JSON body returned by a successful login.
+    """
+    token = login_body["refresh_token"]
+
+    logout = client.post("/auth/logout", json={"refresh_token": token})
+    refresh = client.post("/auth/refresh", json={"refresh_token": token})
+
+    assert logout.status_code == 204
+    assert refresh.status_code == 401
+
+
+def test_logout_twice_returns_204_both_times(client, login_body):
+    """Verify that logging out twice with the same token is idempotent.
+
+        Args:
+            client: FastAPI test client used to submit the requests.
+            login_body: JSON body returned by a successful login.
+    """
+    token = login_body["refresh_token"]
+
+    first = client.post("/auth/logout", json={"refresh_token": token})
+    second = client.post("/auth/logout", json={"refresh_token": token})
+
+    assert first.status_code == 204
+    assert second.status_code == 204
+
+
+def test_logout_with_an_unknown_token_returns_204(client):
+    """Verify that logging out with an unknown token still returns HTTP 204."""
+    response = client.post("/auth/logout", json={"refresh_token": "unknown"})
+    assert response.status_code == 204
+
+
+def test_logout_without_a_token_returns_422(client):
+    """Verify that a logout request without a token is rejected with HTTP 422."""
+    assert client.post("/auth/logout", json={}).status_code == 422
 
 #endregion

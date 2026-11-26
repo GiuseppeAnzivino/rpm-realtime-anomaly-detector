@@ -1,11 +1,12 @@
 """
 TEST SUITE (UNIT TESTS)
-Description: Contains unit tests for validating the UserRepository implementation and email normalization utility of the Auth-Service microservice.
-Responsibility: Verifies user creation, retrieval, updates, deletion, email normalization, duplicate email handling, transaction rollback, database integrity constraints, and behavior when requested users do not exist.
+Description: Contains unit tests for validating the UserRepository and RefreshTokenRepository implementations and the email normalization utility of the Auth-Service microservice.
+Responsibility: Verifies user creation, retrieval, updates, deletion, email normalization, duplicate email handling, transaction rollback, database integrity constraints, behavior when requested users do not exist, and refresh token creation, lookup and atomic revocation.
 Independence: Uses pytest, SQLAlchemy, and an isolated in-memory SQLite database to test repository operations without requiring an external database instance or other application services.
 """
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from functools import partial
 
 import pytest
@@ -14,8 +15,16 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from business.exceptions import DuplicateEmailError, UserNotFoundError
-from data.models import Base, User, UserRole
-from data.repository import UserRepository, normalise_email
+from data.models import Base, RefreshToken, User, UserRole
+from data.repository import RefreshTokenRepository, UserRepository, normalise_email
+
+
+#region Test Configuration
+
+NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+TOKEN_HASH = "a" * 64
+
+#endregion
 
 
 #region Test Fixtures
@@ -52,6 +61,20 @@ def fixture_repository(session):
     return UserRepository(session)
 
 
+@pytest.fixture(name="refresh_repository")
+def fixture_refresh_repository(session):
+    """
+        Provide a RefreshTokenRepository instance using the test database session.
+
+        Args:
+            session: The SQLAlchemy session connected to the in-memory test database.
+
+        Returns:
+            RefreshTokenRepository: The repository configured for the current test.
+    """
+    return RefreshTokenRepository(session)
+
+
 @pytest.fixture(name="make_user")
 def fixture_make_user():
     """
@@ -82,6 +105,27 @@ def fixture_created_user(repository, make_user):
             User: The persisted test user with generated fields populated.
     """
     return repository.add(make_user(email="rossi@example.com"))
+
+
+@pytest.fixture(name="stored_token")
+def fixture_stored_token(refresh_repository, created_user):
+    """
+        Provide a refresh token already persisted through the repository.
+
+        Args:
+            refresh_repository: The repository used to create the test token.
+            created_user: The user owning the token.
+
+        Returns:
+            RefreshToken: The persisted token with generated fields populated.
+    """
+    return refresh_repository.add(
+        RefreshToken(
+            user_id=created_user.user_id,
+            token_hash=TOKEN_HASH,
+            expires_at=NOW + timedelta(days=7),
+        )
+    )
 
 
 #endregion
@@ -492,6 +536,138 @@ def test_remove_raises_for_unknown_user(repository):
     """
     with pytest.raises(UserNotFoundError):
         repository.remove(uuid.uuid4())
+
+
+#endregion
+
+
+#region Refresh Token Creation and Retrieval Tests
+
+def test_add_token_persists_it_with_generated_fields(stored_token, created_user):
+    """
+        Verify that adding a refresh token persists it and populates
+        its automatically generated fields.
+
+        Args:
+            stored_token: A refresh token already persisted through the repository.
+            created_user: The user owning the token.
+
+        Asserts:
+            The token has a valid UUID, belongs to the user, has a creation
+            timestamp and is not revoked.
+    """
+    assert isinstance(stored_token.token_id, uuid.UUID)
+    assert stored_token.user_id == created_user.user_id
+    assert stored_token.created_at is not None
+    assert stored_token.revoked_at is None
+
+
+def test_add_token_rejects_a_duplicate_hash(refresh_repository, created_user, stored_token):
+    """
+        Verify that two refresh tokens cannot share the same hash.
+
+        Args:
+            refresh_repository: The repository used to perform the insertion.
+            created_user: The user owning the tokens.
+            stored_token: The existing token whose hash is already stored.
+
+        Asserts:
+            The unique constraint on the hash raises IntegrityError.
+    """
+    with pytest.raises(IntegrityError):
+        refresh_repository.add(
+            RefreshToken(
+                user_id=created_user.user_id,
+                token_hash=TOKEN_HASH,
+                expires_at=NOW + timedelta(days=7),
+            )
+        )
+
+
+def test_get_by_hash_returns_the_token(refresh_repository, stored_token):
+    """
+        Verify that an existing refresh token can be retrieved by its hash.
+
+        Args:
+            refresh_repository: The repository used to retrieve the token.
+            stored_token: The existing persisted token.
+
+        Asserts:
+            The returned object is the same token instance already present
+            in the current SQLAlchemy session.
+    """
+    assert refresh_repository.get_by_hash(TOKEN_HASH) is stored_token
+
+
+def test_get_by_hash_returns_none_for_unknown_hash(refresh_repository):
+    """
+        Verify that retrieving a nonexistent token hash returns None.
+
+        Args:
+            refresh_repository: The repository used to perform the lookup.
+
+        Asserts:
+            The lookup returns None when no matching token exists.
+    """
+    assert refresh_repository.get_by_hash("b" * 64) is None
+
+
+#endregion
+
+
+#region Refresh Token Revocation Tests
+
+def test_revoke_sets_revoked_at_and_returns_true(refresh_repository, stored_token):
+    """
+        Verify that revoking an active token stores the revocation time.
+
+        Args:
+            refresh_repository: The repository used to revoke the token.
+            stored_token: The existing persisted token.
+
+        Asserts:
+            The operation returns True and the token carries the revocation time.
+    """
+    revoked = refresh_repository.revoke(TOKEN_HASH, NOW)
+
+    found = refresh_repository.get_by_hash(TOKEN_HASH)
+    assert revoked is True
+    assert found.revoked_at.replace(tzinfo=timezone.utc) == NOW
+
+
+def test_revoke_twice_returns_false_and_keeps_the_first_time(
+    refresh_repository, stored_token
+):
+    """
+        Verify that revoking an already revoked token changes nothing.
+
+        Args:
+            refresh_repository: The repository used to revoke the token.
+            stored_token: The existing persisted token.
+
+        Asserts:
+            The second call returns False and the original revocation time is kept.
+    """
+    refresh_repository.revoke(TOKEN_HASH, NOW)
+
+    second = refresh_repository.revoke(TOKEN_HASH, NOW + timedelta(hours=1))
+
+    found = refresh_repository.get_by_hash(TOKEN_HASH)
+    assert second is False
+    assert found.revoked_at.replace(tzinfo=timezone.utc) == NOW
+
+
+def test_revoke_unknown_hash_returns_false(refresh_repository):
+    """
+        Verify that revoking a token that does not exist is not an error.
+
+        Args:
+            refresh_repository: The repository used to perform the revocation.
+
+        Asserts:
+            The operation returns False and raises nothing.
+    """
+    assert refresh_repository.revoke("b" * 64, NOW) is False
 
 
 #endregion
