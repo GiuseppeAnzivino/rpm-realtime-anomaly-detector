@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import uuid
 
-from sqlalchemy import Boolean, DateTime, Enum as SAEnum, String, Uuid
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, ForeignKey, String, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -137,5 +137,52 @@ class User(Base):
         )
 
     #endregion
+
+#endregion
+
+
+#region Refresh Token ORM Model
+
+class RefreshToken(Base):
+    """
+    ORM model representing a refresh token issued at login.
+
+    Only the SHA-256 hash of the token is stored, never the token itself, so a
+    database leak does not expose tokens that can be used. A token is revoked by
+    setting revoked_at; rows are deleted together with their user.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    token_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
 
 #endregion
