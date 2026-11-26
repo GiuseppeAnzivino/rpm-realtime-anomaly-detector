@@ -108,11 +108,12 @@ jobs:
         uses: actions/checkout@v6
 
       # ---------- Python ----------
+      # Keep the version aligned with the one used in the service Dockerfile
       - name: Set up Python
         if: inputs.kind == 'python'
         uses: actions/setup-python@v6
         with:
-          python-version: "3.14"
+          python-version: "3.12"
 
       - name: Check requirements.txt and install dependencies
         if: inputs.kind == 'python'
@@ -280,7 +281,7 @@ jobs:
 #   # started, so empty services never break "docker compose pull".
 #   # Prerequisite: in the compose file the service names are the same
 #   # as the folder names, and the images are
-#   #   image: giuseppeanzivino/rpm-<service>:${IMAGE_TAG:-latest}
+#   #   image: giuseppefabrizioanzivino/rpm-<service>:${IMAGE_TAG:-latest}
 #   # ---------------------------------------------------------------
 #   api-tests:
 #     needs: [detect, publish]

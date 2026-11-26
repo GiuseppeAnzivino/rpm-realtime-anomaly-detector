@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 # ===================================================================
-# Every service has its OWN independent pipeline (service-pipeline.yaml):
+# Every service has its OWN independent pipeline (service_pipeline.yml):
 #
 #   detect -> test -> publish -> api-tests -> (ok) cleanup
 #                                    |
